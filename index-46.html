@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>TASDIK RUNNER 3D</title>
+<style>
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#72b7e6;touch-action:none;font-family:Arial,sans-serif}
+canvas{display:block;width:100%;height:100%}
+#hud{position:fixed;z-index:5;top:max(10px,env(safe-area-inset-top));left:14px;right:14px;color:#fff;display:flex;justify-content:space-between;font:900 18px Arial;text-shadow:0 2px 4px #000;pointer-events:none}
+#load{position:fixed;inset:0;z-index:10;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#111827;color:#fff}
+.logo{font-size:34px;font-weight:900}.tip{margin:14px;opacity:.8}.bar{width:78vw;max-width:360px;height:10px;background:#334155;border-radius:20px;overflow:hidden}.fill{height:100%;width:0;background:#ffd21f}
+#err{display:none;position:fixed;inset:0;z-index:30;background:#111;color:#fff;padding:28px;font:16px Arial}
+#over{display:none;position:fixed;inset:0;z-index:8;align-items:center;justify-content:center;text-align:center;color:#fff;font:900 30px Arial;text-shadow:0 3px 6px #000}
+small{font-size:15px}
+</style>
+</head>
+<body>
+<div id="load"><div class="logo">🏃 TASDIK RUNNER</div><div class="tip" id="lt">Loading 5%</div><div class="bar"><div class="fill" id="lf"></div></div></div>
+<div id="hud"><span>🏃 TASDIK RUNNER</span><span>🪙 <b id="coins">0</b> &nbsp; ⭐ <b id="score">0</b></span></div>
+<div id="over">GAME OVER<br><small>Tap to restart</small></div>
+<div id="err"></div>
+<canvas id="game"></canvas>
+<script>
+(function(){
+const canvas=document.getElementById('game');
+const gl=canvas.getContext('webgl',{antialias:true});
+const err=document.getElementById('err');
+if(!gl){err.style.display='block';err.textContent='WebGL is not available on this device/browser.';return;}
+
+const VS='attribute vec3 a_position; attribute vec3 a_color; uniform mat4 u_matrix; varying vec3 v_color; void main(){gl_Position=u_matrix*vec4(a_position,1.0);v_color=a_color;}';
+const FS='precision mediump float; varying vec3 v_color; void main(){gl_FragColor=vec4(v_color,1.0);}';
+function compile(type,src){const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw Error(gl.getShaderInfoLog(s));return s;}
+const program=gl.createProgram();
+gl.attachShader(program,compile(gl.VERTEX_SHADER,VS));
+gl.attachShader(program,compile(gl.FRAGMENT_SHADER,FS));
+gl.linkProgram(program);
+if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(program));
+gl.useProgram(program);
+const posLoc=gl.getAttribLocation(program,'a_position');
+const colLoc=gl.getAttribLocation(program,'a_color');
+const matLoc=gl.getUniformLocation(program,'u_matrix');
+const pbuf=gl.createBuffer(), cbuf=gl.createBuffer();
+
+function perspective(fov,aspect,near,far){
+ const f=1/Math.tan(fov/2), nf=1/(near-far);
+ return new Float32Array([f/aspect,0,0,0, 0,f,0,0, 0,0,(far+near)*nf,-1, 0,0,(2*far*near)*nf,0]);
+}
+function normalize(x,y,z){let l=Math.hypot(x,y,z)||1;return [x/l,y/l,z/l]}
+function cross(a,b){return [a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]]}
+function dot(a,b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]}
+function lookAt(eye,center,up){
+ let z=normalize(eye[0]-center[0],eye[1]-center[1],eye[2]-center[2]);
+ let x=normalize(...cross(up,z)); let y=cross(z,x);
+ return new Float32Array([
+  x[0],y[0],z[0],0,
+  x[1],y[1],z[1],0,
+  x[2],y[2],z[2],0,
+  -dot(x,eye),-dot(y,eye),-dot(z,eye),1
+ ]);
+}
+function multiply(a,b){
+ let o=new Float32Array(16);
+ for(let c=0;c<4;c++)for(let r=0;r<4;r++)
+   o[c*4+r]=a[r]*b[c*4]+a[4+r]*b[c*4+1]+a[8+r]*b[c*4+2]+a[12+r]*b[c*4+3];
+ return o;
+}
+let verts=[],cols=[];
+function cube(x,y,z,w,h,d,color,rot=0){
+ const X=w/2,Y=h/2,Z=d/2,co=Math.cos(rot),si=Math.sin(rot);
+ const base=[[-X,-Y,-Z],[X,-Y,-Z],[X,Y,-Z],[-X,Y,-Z],[-X,-Y,Z],[X,-Y,Z],[X,Y,Z],[-X,Y,Z]];
+ const ids=[0,1,2,0,2,3,1,5,6,1,6,2,5,4,7,5,7,6,4,0,3,4,3,7,3,2,6,3,6,7,4,5,1,4,1,0];
+ for(const id of ids){let p=base[id],qx=p[0]*co-p[2]*si,qz=p[0]*si+p[2]*co;verts.push(qx+x,p[1]+y,qz+z);cols.push(color[0],color[1],color[2]);}
+}
+const laneX=l=>l*3.2;
+function world(){
+ // dark road / rail bed
+ cube(0,-.35,-85,14,.5,190,[.12,.12,.15]);
+ for(const l of [-1,0,1]){
+   const x=laneX(l);
+   cube(x-.92,-.02,-85,.09,.12,190,[.42,.42,.46]);
+   cube(x+.92,-.02,-85,.09,.12,190,[.42,.42,.46]);
+   for(let z=-180;z<10;z+=3.4) cube(x,-.08,z,2.7,.12,.38,[.35,.20,.12]);
+ }
+ for(const x of [-4.9,4.9]){
+   for(let z=-175;z<10;z+=11){
+     cube(x,1.7,z,.10,3.4,.10,[.10,.10,.13]);
+     cube(x+(x<0?.22:-.22),3.35,z,.48,.12,.12,[1,.72,.18]);
+   }
+ }
+ // city
+ for(const side of [-1,1]) for(let i=0;i<25;i++){
+   const z=-8-i*6.8,h=4+(i%6)*1.5,w=2.5+(i%3)*.5,x=side*(7.1+(i%4)*.75);
+   cube(x,h/2,z,w,h,4,[.20,.25,.36]);
+   cube(x+side*(w/2+.03),h*.62,z-.7,.05,.55,.55,[1,.60,.18]);
+ }
+}
+function train(l,z){
+ const x=laneX(l);
+ cube(x,1.65,z,2.7,3.2,6.5,[.72,.10,.08]);
+ cube(x,2.35,z-3.28,2.25,.95,.08,[.05,.07,.10]);
+ cube(x,2.35,z+3.28,2.25,.95,.08,[.05,.07,.10]);
+ for(const zz of [z-2,z,z+2]) cube(x,1.95,zz,2.30,.68,.10,[.08,.08,.10]);
+ for(const side of [-1,1])for(const zz of [z-2,z,z+2])cube(x+side*1.38,.48,zz,.35,.50,.80,[.03,.03,.04]);
+}
+function barrier(l,z){
+ const x=laneX(l);
+
+ // Two sturdy side posts
+ cube(x-1.22,.88,z,.22,1.76,.34,[.52,.25,.18]);
+ cube(x+1.22,.88,z,.22,1.76,.34,[.52,.25,.18]);
+
+ // Main horizontal safety arm
+ cube(x,1.45,z,2.72,.48,.34,[.92,.04,.04]);
+
+ // Alternating white reflective bands
+ for(const bx of [-.92,-.30,.30,.92]){
+   cube(x+bx,1.45,z-.18,.34,.50,.05,[.95,.95,.95]);
+ }
+
+ // Large circular-looking warning reflectors, built from layered low-poly blocks
+ cube(x-1.08,1.46,z-.22,.48,.48,.08,[.12,.10,.18]);
+ cube(x+1.08,1.46,z-.22,.48,.48,.08,[.12,.10,.18]);
+ cube(x-1.08,1.46,z-.27,.34,.34,.06,[.42,.43,.50]);
+ cube(x+1.08,1.46,z-.27,.34,.34,.06,[.42,.43,.50]);
+
+ // Lower support beam and mounting blocks
+ cube(x,1.08,z,.95,.14,.40,[.34,.18,.15]);
+ cube(x-1.22,.18,z,.46,.22,.58,[.18,.18,.21]);
+ cube(x+1.22,.18,z,.46,.22,.58,[.18,.18,.21]);
+}
+function coin(l,z){cube(laneX(l),1.65,z,.48,.48,.16,[1,.80,.05],performance.now()/500);}
+function player(){
+ const t=performance.now()/1000;
+ const run=Math.sin(t*speed*.42);
+ const airborne=jump>0.05 || jv>0;
+ const jy=jump;
+ const bob=airborne ? 0 : Math.sin(t*9)*.035;
+ const x=laneX(playerLane);
+
+ // torso + shirt details
+ cube(x,1.30+jy+bob,0,.86,1.28,.60,[.05,.34,.92]);
+ cube(x,1.45+jy+bob,-.315,.48,.16,.035,[.95,.82,.10]);
+ cube(x,1.68+jy+bob,-.315,.18,.18,.035,[.06,.08,.12]);
+
+ // detailed head, hair, ears and cap
+ cube(x,2.24+jy+bob,0,.70,.72,.70,[.72,.46,.30]);
+ cube(x,2.61+jy+bob,0,.82,.18,.80,[.035,.025,.03]);
+ cube(x,2.70+jy+bob,-.02,.62,.12,.66,[.06,.10,.16]);
+ // ears
+ cube(x-.38,2.28+jy+bob,0,.10,.20,.16,[.65,.38,.25]);
+ cube(x+.38,2.28+jy+bob,0,.10,.20,.16,[.65,.38,.25]);
+ // neck
+ cube(x,1.83+jy+bob,0,.30,.18,.30,[.64,.39,.25]);
+
+ if(airborne){
+   // jump pose: arms up and legs tucked
+   cube(x-.50,1.72+jy+bob,-.01,.18,.72,.18,[.72,.46,.30],-.35);
+   cube(x+.50,1.72+jy+bob,-.01,.18,.72,.18,[.72,.46,.30],.35);
+   cube(x-.20,.72+jy+bob,-.02,.24,.62,.24,[.04,.05,.07],-.28);
+   cube(x+.20,.72+jy+bob,-.02,.24,.62,.24,[.04,.05,.07],.28);
+ }else{
+   // running arms and legs
+   cube(x-.48,1.35+bob,-.01,.18,.88,.18,[.72,.46,.30],-run*.22);
+   cube(x+.48,1.35+bob,-.01,.18,.88,.18,[.72,.46,.30],run*.22);
+   cube(x-.22,.44+bob,-.01,.23,.82,.23,[.04,.05,.07],run*.28);
+   cube(x+.22,.44+bob,-.01,.23,.82,.23,[.04,.05,.07],-run*.28);
+ }
+
+ // hands
+ cube(x-.58,1.02+jy+bob,-.01,.22,.22,.22,[.72,.46,.30]);
+ cube(x+.58,1.02+jy+bob,-.01,.22,.22,.22,[.72,.46,.30]);
+
+ // shoes with bright soles
+ cube(x-.22,.04+jy+bob,-.18,.42,.16,.70,[.82,.08,.08]);
+ cube(x+.22,.04+jy+bob,-.18,.42,.16,.70,[.82,.08,.08]);
+ cube(x-.22,-.035+jy+bob,-.20,.43,.06,.72,[1.0,.78,.08]);
+ cube(x+.22,-.035+jy+bob,-.20,.43,.06,.72,[1.0,.78,.08]);
+
+ // backpack and straps
+ cube(x,1.20+jy+bob,.38,.60,.86,.20,[.72,.08,.10]);
+ cube(x-.31,1.34+jy+bob,.31,.07,.72,.08,[.03,.05,.08]);
+ cube(x+.31,1.34+jy+bob,.31,.07,.72,.08,[.03,.05,.08]);
+}
+let playerLane=0,targetLane=0,objects=[],coins=0,score=0,speed=17,spawn=0,started=false,dead=false,jump=0,jv=0;
+function draw(){
+ verts=[];cols=[];world();
+ for(const o of objects)o.type==='train'?train(o.l,o.z):barrier(o.l,o.z);
+ for(const c of coinObjects)coin(c.l,c.z);
+ player();
+ gl.clearColor(.45,.72,.90,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.enable(gl.DEPTH_TEST);
+ const aspect=canvas.width/canvas.height;
+ const P=perspective(74*Math.PI/180,aspect,.1,240);
+ const V=lookAt([playerLane*1.0,5.0,10.5],[playerLane*1.5,1.3,-24],[0,1,0]);
+ const M=multiply(P,V);
+ gl.bindBuffer(gl.ARRAY_BUFFER,pbuf);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(verts),gl.DYNAMIC_DRAW);
+ gl.enableVertexAttribArray(posLoc);gl.vertexAttribPointer(posLoc,3,gl.FLOAT,false,0,0);
+ gl.bindBuffer(gl.ARRAY_BUFFER,cbuf);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(cols),gl.DYNAMIC_DRAW);
+ gl.enableVertexAttribArray(colLoc);gl.vertexAttribPointer(colLoc,3,gl.FLOAT,false,0,0);
+ gl.uniformMatrix4fv(matLoc,false,M);
+ gl.drawArrays(gl.TRIANGLES,0,verts.length/3);
+}
+function resize(){canvas.width=Math.max(1,innerWidth*devicePixelRatio);canvas.height=Math.max(1,innerHeight*devicePixelRatio);gl.viewport(0,0,canvas.width,canvas.height)}
+addEventListener('resize',resize);resize();
+
+let coinObjects=[];
+function reset(){objects=[];coinObjects=[];coins=0;score=0;speed=17;spawn=0;playerLane=0;targetLane=0;jump=0;jv=0;dead=false;document.getElementById('over').style.display='none';}
+let sx=0,sy=0;
+addEventListener('pointerdown',e=>{sx=e.clientX;sy=e.clientY;if(dead)reset()});
+addEventListener('pointerup',e=>{
+ if(dead)return;
+ let dx=e.clientX-sx,dy=e.clientY-sy;if(Math.max(Math.abs(dx),Math.abs(dy))<30)return;
+ if(Math.abs(dx)>Math.abs(dy))targetLane=Math.max(-1,Math.min(1,targetLane+(dx>0?1:-1)));
+ else if(dy<0&&jump===0)jv=11.2;
+});
+function loop(now){
+ if(started&&!dead){
+   const dt=Math.min(.035,(now-last)/1000);
+   playerLane+=(targetLane-playerLane)*Math.min(1,dt*11);
+   if(jump>0||jv>0){jump+=jv*dt;jv-=27*dt;if(jump<0){jump=0;jv=0}}
+   speed=Math.min(30,speed+dt*.5);score+=dt*speed;
+   document.getElementById('score').textContent=Math.floor(score);document.getElementById('coins').textContent=coins;
+   spawn-=dt;if(spawn<=0){spawn=Math.max(.85,1.25-speed*.012);objects.push({type:Math.random()<.48?'train':'barrier',l:Math.floor(Math.random()*3)-1,z:-125});if(Math.random()<.8)for(let i=0;i<4;i++)coinObjects.push({l:Math.floor(Math.random()*3)-1,z:-100-i*3.2})}
+   for(let i=objects.length-1;i>=0;i--){let o=objects[i];o.z+=speed*dt;if(o.z>10)objects.splice(i,1);else if(Math.abs(o.z)<1.25&&Math.abs(o.l-playerLane)<.38){if((o.type==='barrier'&&jump>1.05)||(o.type==='train'&&jump>2.0))continue;dead=true;document.getElementById('over').style.display='flex'}}
+   for(let i=coinObjects.length-1;i>=0;i--){let c=coinObjects[i];c.z+=speed*dt;if(c.z>10)coinObjects.splice(i,1);else if(Math.abs(c.z)<1.2&&Math.abs(c.l-playerLane)<.45){coins++;coinObjects.splice(i,1)}}
+ }
+ draw();requestAnimationFrame(loop);
+}
+let last=performance.now();
+const steps=[5,10,30,50,80,90,100];let si=0;
+function load(){document.getElementById('lf').style.width=steps[si]+'%';document.getElementById('lt').textContent='Loading '+steps[si]+'%';if(si++<steps.length-1)setTimeout(load,380);else setTimeout(()=>{document.getElementById('load').style.display='none';started=true},500)}
+load();requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
